@@ -1,4 +1,5 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -15,11 +16,16 @@ const OPENAI_CONFIG = {
   BASE_URL: process.env.OPENAI_BASE_URL || 'https://auth.openai.com',
   CLIENT_ID: process.env.OPENAI_CLIENT_ID || DEFAULT_OPENAI_CLIENT_ID,
   REDIRECT_URI: process.env.OPENAI_REDIRECT_URI || 'http://localhost:1455/auth/callback',
-  SCOPE: process.env.OPENAI_SCOPE || 'openid profile email offline_access'
+  SCOPE: process.env.OPENAI_SCOPE || 'openid profile email offline_access',
+  OUTBOUND_PROXY_URL: process.env.OUTBOUND_PROXY_URL || process.env.OPENAI_PROXY_URL || ''
 };
 
 const OAUTH_SESSIONS = new Map();
 const SESSION_TTL_MS = 10 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 30 * 1000;
+const PROXY_AGENT_CACHE = new Map();
+const SUPPORTED_PROXY_PROTOCOLS = new Set(['http:', 'https:', 'socks5:', 'socks5h:']);
+let proxyAgentConstructorPromise = null;
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -58,11 +64,123 @@ function generateOpenAIPKCE() {
   return { codeVerifier, codeChallenge };
 }
 
+function trimTrailingSlash(value) {
+  return String(value || '').replace(/\/+$/, '');
+}
+
+function normalizeOpenAIBaseUrl(value) {
+  const candidate = String(value || '').trim() || OPENAI_CONFIG.BASE_URL;
+  let parsed;
+
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error('授权域名无效，请输入完整的 http(s):// 地址');
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('授权域名只支持 http:// 或 https://');
+  }
+
+  return trimTrailingSlash(parsed.toString());
+}
+
+function normalizeProxyUrl(value) {
+  const candidate = String(value || '').trim() || OPENAI_CONFIG.OUTBOUND_PROXY_URL;
+  if (!candidate) return '';
+
+  let parsed;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw new Error('代理地址无效，请输入完整的代理 URL');
+  }
+
+  if (!SUPPORTED_PROXY_PROTOCOLS.has(parsed.protocol)) {
+    throw new Error('代理协议只支持 HTTP、HTTPS、SOCKS5 和 SOCKS5H');
+  }
+
+  return parsed.toString();
+}
+
+async function getProxyAgent(proxyUrl) {
+  if (!proxyUrl) return undefined;
+  if (!proxyAgentConstructorPromise) {
+    proxyAgentConstructorPromise = import('proxy-agent').then(module => module.ProxyAgent);
+  }
+  if (!PROXY_AGENT_CACHE.has(proxyUrl)) {
+    const ProxyAgent = await proxyAgentConstructorPromise;
+    PROXY_AGENT_CACHE.set(proxyUrl, new ProxyAgent({
+      getProxyForUrl: () => proxyUrl
+    }));
+  }
+
+  return PROXY_AGENT_CACHE.get(proxyUrl);
+}
+
+function resolveOpenAIRequestConfig(overrides = {}) {
+  return {
+    baseUrl: normalizeOpenAIBaseUrl(overrides.baseUrl),
+    outboundProxyUrl: normalizeProxyUrl(overrides.outboundProxyUrl),
+    clientId: resolveClientId(overrides.clientId)
+  };
+}
+
 function decodeJwtPayload(token) {
   const parts = String(token || '').split('.');
   if (parts.length !== 3) throw new Error('Invalid ID token');
   const payload = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8');
   return JSON.parse(payload);
+}
+
+function safeDecodeJwtPayload(token) {
+  try {
+    return decodeJwtPayload(token);
+  } catch {
+    return null;
+  }
+}
+
+function pickFirstNonEmpty(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return '';
+}
+
+function extractOpenAIAccountInfo(tokenData) {
+  const accessPayload = safeDecodeJwtPayload(tokenData.access_token) || {};
+  const idPayload = safeDecodeJwtPayload(tokenData.id_token) || {};
+  const accessAuth = accessPayload['https://api.openai.com/auth'] || {};
+  const idAuth = idPayload['https://api.openai.com/auth'] || {};
+  const accessProfile = accessPayload['https://api.openai.com/profile'] || {};
+  const organizations = Array.isArray(idAuth.organizations) ? idAuth.organizations : [];
+  const defaultOrganization = organizations.find(item => item && item.is_default) || organizations[0] || null;
+
+  return {
+    userEmail: pickFirstNonEmpty(
+      idPayload.email,
+      accessProfile.email
+    ),
+    accountId: pickFirstNonEmpty(
+      accessAuth.chatgpt_account_id,
+      idAuth.chatgpt_account_id
+    ),
+    userId: pickFirstNonEmpty(
+      accessAuth.chatgpt_user_id,
+      idAuth.chatgpt_user_id,
+      accessAuth.user_id,
+      idAuth.user_id
+    ),
+    organizationId: pickFirstNonEmpty(defaultOrganization && defaultOrganization.id),
+    planType: pickFirstNonEmpty(
+      accessAuth.chatgpt_plan_type,
+      idAuth.chatgpt_plan_type
+    ),
+    accessTokenExpiresAt: pickFirstNonEmpty(accessPayload.exp, 0),
+    sessionToken: String(tokenData.id_token || '')
+  };
 }
 
 
@@ -72,8 +190,54 @@ function resolveClientId(clientIdFromRequest) {
   return OPENAI_CONFIG.CLIENT_ID;
 }
 
-async function parseJsonResponse(response) {
-  const rawText = await response.text();
+async function requestText(url, options = {}) {
+  const {
+    method = 'GET',
+    headers = {},
+    body = '',
+    proxyUrl = '',
+    timeoutMs = REQUEST_TIMEOUT_MS
+  } = options;
+
+  const agent = await getProxyAgent(proxyUrl);
+
+  return new Promise((resolve, reject) => {
+    const targetUrl = new URL(url);
+    const client = targetUrl.protocol === 'https:' ? https : http;
+    const req = client.request({
+      protocol: targetUrl.protocol,
+      hostname: targetUrl.hostname,
+      port: targetUrl.port || undefined,
+      path: `${targetUrl.pathname}${targetUrl.search}`,
+      method,
+      headers,
+      agent
+    }, res => {
+      let rawText = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => rawText += chunk);
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode || 0,
+          headers: res.headers,
+          text: rawText
+        });
+      });
+    });
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('上游请求超时'));
+    });
+
+    req.on('error', reject);
+
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function parseJsonResponse(response) {
+  const rawText = response.text;
   if (!rawText) return {};
 
   try {
@@ -92,19 +256,21 @@ async function handleGenerateAuthUrl(req, res) {
     const state = crypto.randomBytes(32).toString('hex');
     const sessionId = crypto.randomUUID();
 
-    const { clientId } = await readJsonBody(req);
-    const resolvedClientId = resolveClientId(clientId);
+    const { clientId, baseUrl, outboundProxyUrl } = await readJsonBody(req);
+    const requestConfig = resolveOpenAIRequestConfig({ clientId, baseUrl, outboundProxyUrl });
 
     OAUTH_SESSIONS.set(sessionId, {
       codeVerifier: pkce.codeVerifier,
       state,
-      clientId: resolvedClientId,
+      clientId: requestConfig.clientId,
+      baseUrl: requestConfig.baseUrl,
+      outboundProxyUrl: requestConfig.outboundProxyUrl,
       expiresAt: Date.now() + SESSION_TTL_MS
     });
 
     const params = new URLSearchParams({
       response_type: 'code',
-      client_id: resolvedClientId,
+      client_id: requestConfig.clientId,
       redirect_uri: OPENAI_CONFIG.REDIRECT_URI,
       scope: OPENAI_CONFIG.SCOPE,
       code_challenge: pkce.codeChallenge,
@@ -117,8 +283,10 @@ async function handleGenerateAuthUrl(req, res) {
     return sendJson(res, 200, {
       success: true,
       data: {
-        authUrl: `${OPENAI_CONFIG.BASE_URL}/oauth/authorize?${params.toString()}`,
-        sessionId
+        authUrl: `${requestConfig.baseUrl}/oauth/authorize?${params.toString()}`,
+        sessionId,
+        base_url: requestConfig.baseUrl,
+        outbound_proxy_url: requestConfig.outboundProxyUrl
       }
     });
   } catch (err) {
@@ -128,27 +296,36 @@ async function handleGenerateAuthUrl(req, res) {
 
 async function handleExchangeCode(req, res) {
   try {
-    const { code, sessionId } = await readJsonBody(req);
+    const { code, sessionId, clientId, baseUrl, outboundProxyUrl } = await readJsonBody(req);
     const session = OAUTH_SESSIONS.get(String(sessionId));
 
     if (!session) return sendJson(res, 400, { success: false, message: '会话无效或已过期' });
 
-    const clientId = resolveClientId(session.clientId);
+    const requestConfig = resolveOpenAIRequestConfig({
+      clientId: clientId || session.clientId,
+      baseUrl: baseUrl || session.baseUrl,
+      outboundProxyUrl: outboundProxyUrl || session.outboundProxyUrl
+    });
+    const requestBody = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: OPENAI_CONFIG.REDIRECT_URI,
+      client_id: requestConfig.clientId,
+      code_verifier: session.codeVerifier
+    }).toString();
 
-    const tokenRes = await fetch(`${OPENAI_CONFIG.BASE_URL}/oauth/token`, {
+    const tokenRes = await requestText(`${requestConfig.baseUrl}/oauth/token`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: OPENAI_CONFIG.REDIRECT_URI,
-        client_id: clientId,
-        code_verifier: session.codeVerifier
-      })
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(requestBody)
+      },
+      body: requestBody,
+      proxyUrl: requestConfig.outboundProxyUrl
     });
 
-    const tokenData = await parseJsonResponse(tokenRes);
-    if (!tokenRes.ok) {
+    const tokenData = parseJsonResponse(tokenRes);
+    if (tokenRes.status < 200 || tokenRes.status >= 300) {
       const statusCode = tokenRes.status === 429 ? 429 : 400;
       const message = tokenRes.status === 429
         ? 'OpenAI 限流（429）。请稍后重试，或使用你自己的 OPENAI_CLIENT_ID / 代理后再试。'
@@ -156,18 +333,26 @@ async function handleExchangeCode(req, res) {
       return sendJson(res, statusCode, { success: false, message, error: tokenData });
     }
 
-    const payload = decodeJwtPayload(tokenData.id_token);
+    const accountInfo = extractOpenAIAccountInfo(tokenData);
     OAUTH_SESSIONS.delete(String(sessionId));
 
     return sendJson(res, 200, {
       success: true,
       data: {
-        // 返回 Token 信息与 OAuth client_id
         refresh_token: tokenData.refresh_token,
         access_token: tokenData.access_token,
+        id_token: tokenData.id_token,
+        session_token: accountInfo.sessionToken,
         expires_in: tokenData.expires_in,
-        client_id: clientId,
-        user_email: payload.email 
+        access_token_expires_at: accountInfo.accessTokenExpiresAt,
+        client_id: requestConfig.clientId,
+        user_email: accountInfo.userEmail,
+        account_id: accountInfo.accountId,
+        user_id: accountInfo.userId,
+        organization_id: accountInfo.organizationId,
+        plan_type: accountInfo.planType,
+        base_url: requestConfig.baseUrl,
+        outbound_proxy_url: requestConfig.outboundProxyUrl
       }
     });
   } catch (err) {

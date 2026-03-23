@@ -77,28 +77,134 @@ npm start
 ```
 访问地址：http://localhost:3000
 
+## 🌐 代理配置
+
+本项目现在支持两类网络配置：
+
+1. **AUTH BASE URL**
+   - 作用：生成浏览器授权链接时使用的 OpenAI OAuth 域名
+   - 默认值：`https://auth.openai.com`
+   - 用途：如果你的浏览器不能直接访问 OpenAI，可以改成你自己的 **OAuth 反向代理域名**
+
+2. **OUTBOUND PROXY URL**
+   - 作用：仅用于服务端调用 `/oauth/token` 兑换 Token
+   - 支持协议：
+     - `http://`
+     - `https://`
+     - `socks5://`
+     - `socks5h://` （远程 DNS 解析）
+
+### 环境变量
+
+```bash
+OPENAI_BASE_URL=https://auth.openai.com
+OUTBOUND_PROXY_URL=
+OPENAI_CLIENT_ID=app_EMoamEEZ73f0CkXaXp7hrann
+OPENAI_REDIRECT_URI=http://localhost:1455/auth/callback
+OPENAI_SCOPE="openid profile email offline_access"
+PORT=3000
+```
+
+其中：
+
+- `OUTBOUND_PROXY_URL` 为空时，服务端直连 OpenAI
+- `OPENAI_PROXY_URL` 也可作为 `OUTBOUND_PROXY_URL` 的兼容别名
+
+### 本地示例
+
+HTTP 代理：
+
+```powershell
+$env:OUTBOUND_PROXY_URL="http://127.0.0.1:7890"
+npm start
+```
+
+SOCKS5 代理：
+
+```powershell
+$env:OUTBOUND_PROXY_URL="socks5://127.0.0.1:1080"
+npm start
+```
+
+SOCKS5H 代理（远程 DNS）：
+
+```powershell
+$env:OUTBOUND_PROXY_URL="socks5h://127.0.0.1:1080"
+npm start
+```
+
+### 运行时页面配置
+
+页面新增了两个输入框：
+
+- `AUTH BASE URL`
+- `OUTBOUND PROXY URL`
+
+你可以直接在页面里填写并调试，无需每次重启服务。
+
+### 浏览器代理说明
+
+请注意：
+
+- `OUTBOUND PROXY URL` 只影响 **服务端兑换 Token**
+- 浏览器访问授权页时，**网页本身不能强制让浏览器走 HTTP / SOCKS 代理**
+- 如果浏览器侧也需要代理，你有两种方式：
+  1. 给浏览器或系统本身配置代理
+  2. 在 `AUTH BASE URL` 中填入你自己的 OAuth 反向代理域名
+
+### 服务器部署说明
+
+服务器部署时同样适用：
+
+- 如果服务器访问 OpenAI 需要代理，配置 `OUTBOUND_PROXY_URL`
+- 如果最终用户浏览器无法直接访问 OpenAI，则还需要提供可访问的 `AUTH BASE URL`（OAuth 反向代理域名）
+
 ## 🔌 API 文档
 1. 生成授权链接
 
 ```
 Endpoint: POST /api/generate-auth-url
-Response: { "success": true, "data": { "authUrl": "...", "sessionId": "..." } }
+Body: {
+  "baseUrl": "https://auth.openai.com",
+  "outboundProxyUrl": "socks5h://127.0.0.1:1080"
+}
+Response: {
+  "success": true,
+  "data": {
+    "authUrl": "...",
+    "sessionId": "...",
+    "base_url": "https://auth.openai.com",
+    "outbound_proxy_url": "socks5h://127.0.0.1:1080"
+  }
+}
 ```
 
 2. 兑换 Token
 
 ```
 Endpoint: POST /api/exchange-code
-Body: { "code": "...", "sessionId": "..." }
+Body: {
+  "code": "...",
+  "sessionId": "...",
+  "baseUrl": "https://auth.openai.com",
+  "outboundProxyUrl": "socks5h://127.0.0.1:1080"
+}
 Response:
 {
   "success": true,
   "data": {
     "refresh_token": "...",
     "access_token": "...",
+    "id_token": "...",
+    "session_token": "...",
     "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
     "expires_in": 2592000,
-    "user_email": "user@..."
+    "user_email": "user@...",
+    "account_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "organization_id": "org_xxx",
+    "plan_type": "team",
+    "base_url": "https://auth.openai.com",
+    "outbound_proxy_url": "socks5h://127.0.0.1:1080"
   }
 }
 ```

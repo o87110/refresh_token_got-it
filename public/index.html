@@ -303,6 +303,30 @@
 
     <main>
         <div class="control-panel">
+
+            <section id="networkConfig">
+                <h2>STEP 00 // NETWORK_CONFIG</h2>
+                <p style="color: #8ddcff; font-size: 12px; line-height: 1.7;">
+                    AUTH BASE URL 用于浏览器授权页。若浏览器本身无法直连 OpenAI，请填写你的 OAuth 反向代理域名。
+                    OUTBOUND PROXY URL 仅用于服务端兑换 Token，支持 HTTP / HTTPS / SOCKS5 / SOCKS5H。
+                </p>
+
+                <div style="margin-top: 18px;">
+                    <label style="font-size: 12px; color: #8ddcff; font-weight: bold;">AUTH BASE URL</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="oauthBaseUrl" placeholder="留空使用服务端默认值，例如 https://auth.openai.com">
+                        <button class="btn btn-copy" onclick="clearField('oauthBaseUrl')">清空</button>
+                    </div>
+                </div>
+
+                <div style="margin-top: 18px;">
+                    <label style="font-size: 12px; color: #8ddcff; font-weight: bold;">OUTBOUND PROXY URL</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="outboundProxyUrl" placeholder="例如 http://127.0.0.1:7890 / socks5://127.0.0.1:1080 / socks5h://127.0.0.1:1080">
+                        <button class="btn btn-copy" onclick="clearField('outboundProxyUrl')">清空</button>
+                    </div>
+                </div>
+            </section>
             
             <section id="step1">
                 <h2>STEP 01 // INITIALIZE_AUTH</h2>
@@ -329,12 +353,31 @@
 
             <section id="resultArea" class="hidden result-box">
                 <h2 style="color: var(--success-color)">>> OPERATION SUCCESSFUL</h2>
+                <p style="margin-bottom: 15px; color: #8ddcff; font-size: 12px;">
+                    可按需调整 CLIENT_ID / EMAIL / ACCOUNT_ID 后再导出目标格式。
+                </p>
 
                 <div style="margin-bottom: 15px;">
                     <label style="font-size: 12px; color: var(--accent-color); font-weight: bold;">CLIENT_ID</label>
                     <div class="input-wrapper">
-                        <input type="text" id="clientId" readonly style="color: var(--accent-color);">
+                        <input type="text" id="clientId" style="color: var(--accent-color);">
                         <button class="btn btn-copy" onclick="copy('clientId', 'CLIENT_ID')">复制</button>
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 15px;">
+                    <label style="font-size: 12px; color: #ffd166; font-weight: bold;">EMAIL</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="email" placeholder="若未自动提取，可在此手动补充" style="color: #ffd166;">
+                        <button class="btn btn-copy" onclick="copy('email', 'EMAIL')">复制</button>
+                    </div>
+                </div>
+
+                <div style="margin-bottom: 15px;">
+                    <label style="font-size: 12px; color: #ff8fab; font-weight: bold;">ACCOUNT_ID</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="accountId" placeholder="若未自动提取，可在此手动补充" style="color: #ff8fab;">
+                        <button class="btn btn-copy" onclick="copy('accountId', 'ACCOUNT_ID')">复制</button>
                     </div>
                 </div>
                 
@@ -352,6 +395,20 @@
                         <input type="text" id="accessToken" readonly style="color: var(--primary-color);">
                         <button class="btn btn-copy" onclick="copy('accessToken', 'ACCESS_TOKEN')">复制</button>
                     </div>
+                </div>
+
+                <div style="margin-bottom: 15px;">
+                    <label style="font-size: 12px; color: #f6bd60; font-weight: bold;">SESSION_TOKEN / ID_TOKEN</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="sessionToken" readonly style="color: #f6bd60;">
+                        <button class="btn btn-copy" onclick="copy('sessionToken', 'SESSION_TOKEN')">复制</button>
+                    </div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 20px;">
+                    <button id="exportGenericBtn" class="btn" disabled>导出通用格式</button>
+                    <button id="exportCodexBtn" class="btn" disabled>导出 Codex 格式</button>
+                    <button id="exportSub2ApiBtn" class="btn" disabled>导出 Sub2API 格式</button>
                 </div>
             </section>
         </div>
@@ -379,14 +436,35 @@
     <script>
         let sessionId = localStorage.getItem('oauth_session_id');
         const DEFAULT_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+        const STORAGE_KEYS = {
+            oauthBaseUrl: 'oauth_base_url',
+            outboundProxyUrl: 'outbound_proxy_url'
+        };
+        const exportState = {
+            userId: '',
+            organizationId: '',
+            planType: '',
+            expiresIn: 0,
+            accessTokenExpiresAt: 0
+        };
+
+        function getInput(id) {
+            return document.getElementById(id);
+        }
+
+        function setExportButtonsDisabled(disabled) {
+            document.getElementById('exportGenericBtn').disabled = disabled;
+            document.getElementById('exportCodexBtn').disabled = disabled;
+            document.getElementById('exportSub2ApiBtn').disabled = disabled;
+        }
 
         // 日志系统 (保持英文)
         function log(msg, type = 'info') {
             const terminal = document.getElementById('terminal');
             const entry = document.createElement('div');
             entry.className = 'log-entry';
-            
-            const time = new Date().toLocaleTimeString('en-US', {hour12: false});
+
+            const time = new Date().toLocaleTimeString('en-US', { hour12: false });
             let typeClass = 'log-info';
             if (type === 'success') typeClass = 'log-success';
             if (type === 'error') typeClass = 'log-error';
@@ -394,11 +472,11 @@
 
             entry.innerHTML = `<span class="log-time">[${time}]</span><span class="${typeClass}">${msg}</span>`;
             terminal.appendChild(entry);
-            terminal.scrollTop = terminal.scrollHeight; // Auto scroll
+            terminal.scrollTop = terminal.scrollHeight;
         }
 
         function copy(id, name) {
-            const el = document.getElementById(id);
+            const el = getInput(id);
             el.select();
             navigator.clipboard.writeText(el.value).then(() => {
                 log(`Clipboard updated: ${name} copied.`, 'success');
@@ -408,10 +486,15 @@
         }
 
         function clearInput() {
-            document.getElementById('callbackUrl').value = '';
+            getInput('callbackUrl').value = '';
             log('Input field cleared.', 'warn');
         }
 
+        function clearField(id) {
+            getInput(id).value = '';
+            persistRuntimeConfig();
+            log(`${id} cleared.`, 'warn');
+        }
 
         async function parseApiResponse(res) {
             const rawText = await res.text();
@@ -425,59 +508,278 @@
             }
         }
 
+        function sanitizeFileName(value) {
+            return String(value || 'unknown')
+                .trim()
+                .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+                .replace(/\s+/g, '_');
+        }
+
+        function padNumber(value) {
+            return String(value).padStart(2, '0');
+        }
+
+        function buildTimestamp(date = new Date()) {
+            return [
+                date.getFullYear(),
+                padNumber(date.getMonth() + 1),
+                padNumber(date.getDate()),
+                padNumber(date.getHours()),
+                padNumber(date.getMinutes()),
+                padNumber(date.getSeconds())
+            ].join('');
+        }
+
+        function formatLocalIsoString(date = new Date()) {
+            const offsetMinutes = -date.getTimezoneOffset();
+            const sign = offsetMinutes >= 0 ? '+' : '-';
+            const absoluteOffset = Math.abs(offsetMinutes);
+            const offsetHours = padNumber(Math.floor(absoluteOffset / 60));
+            const offsetMins = padNumber(absoluteOffset % 60);
+
+            return [
+                `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())}`,
+                `T${padNumber(date.getHours())}:${padNumber(date.getMinutes())}:${padNumber(date.getSeconds())}`,
+                `${sign}${offsetHours}:${offsetMins}`
+            ].join('');
+        }
+
+        function getFieldValue(id, fallback = '') {
+            return String(getInput(id).value || fallback || '').trim();
+        }
+
+        function getAccessTokenExpiry() {
+            const accessTokenExpiresAt = Number(exportState.accessTokenExpiresAt || 0);
+            if (accessTokenExpiresAt > 0) return accessTokenExpiresAt;
+
+            const expiresIn = Number(exportState.expiresIn || 0);
+            if (expiresIn > 0) return Math.floor(Date.now() / 1000) + expiresIn;
+
+            return 0;
+        }
+
+        function collectExportData() {
+            return {
+                accessToken: getFieldValue('accessToken'),
+                refreshToken: getFieldValue('refreshToken'),
+                sessionToken: getFieldValue('sessionToken'),
+                clientId: getFieldValue('clientId', DEFAULT_CLIENT_ID),
+                email: getFieldValue('email'),
+                accountId: getFieldValue('accountId'),
+                userId: exportState.userId || '',
+                organizationId: exportState.organizationId || '',
+                planType: exportState.planType || 'account',
+                expiresIn: Number(exportState.expiresIn || 0),
+                accessTokenExpiresAt: getAccessTokenExpiry()
+            };
+        }
+
+        function downloadJson(filename, payload) {
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = filename;
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            URL.revokeObjectURL(url);
+        }
+
+        function ensureExportData() {
+            const data = collectExportData();
+            if (!data.accessToken) {
+                log('Export aborted: access token is missing.', 'error');
+                return null;
+            }
+
+            return data;
+        }
+
+        function buildGenericExport(data) {
+            return {
+                access_token: data.accessToken,
+                refresh_token: data.refreshToken || '',
+                session_token: data.sessionToken || '',
+                client_id: data.clientId || '',
+                email: data.email || '',
+                account_id: data.accountId || ''
+            };
+        }
+
+        function buildCodexExport(data) {
+            return {
+                access_token: data.accessToken,
+                account_id: data.accountId || '',
+                email: data.email || '',
+                expired: data.accessTokenExpiresAt ? formatLocalIsoString(new Date(data.accessTokenExpiresAt * 1000)) : '',
+                id_token: data.sessionToken || '',
+                last_refresh: formatLocalIsoString(new Date()),
+                refresh_token: data.refreshToken || '',
+                type: 'codex'
+            };
+        }
+
+        function buildSub2ApiExport(data) {
+            const expiresAt = data.accessTokenExpiresAt || 0;
+
+            return {
+                exported_at: new Date().toISOString(),
+                proxies: [],
+                accounts: [
+                    {
+                        name: data.email || data.accountId || 'openai-account',
+                        platform: 'openai',
+                        type: 'oauth',
+                        credentials: {
+                            access_token: data.accessToken,
+                            chatgpt_account_id: data.accountId || '',
+                            chatgpt_user_id: data.userId || '',
+                            client_id: data.clientId || '',
+                            expires_at: expiresAt,
+                            expires_in: data.expiresIn || 0,
+                            organization_id: data.organizationId || '',
+                            refresh_token: data.refreshToken || ''
+                        },
+                        extra: {
+                            email: data.email || '',
+                            openai_oauth_responses_websockets_v2_enabled: false,
+                            openai_oauth_responses_websockets_v2_mode: 'off',
+                            openai_passthrough: true
+                        },
+                        concurrency: 10,
+                        priority: 1,
+                        rate_multiplier: 1,
+                        expires_at: expiresAt,
+                        auto_pause_on_expired: true
+                    }
+                ]
+            };
+        }
+
+        function buildCodexFileName(data) {
+            const shortAccountId = sanitizeFileName((data.accountId || 'account').slice(0, 8));
+            const email = sanitizeFileName(data.email || 'unknown');
+            const planType = sanitizeFileName(data.planType || 'account');
+            return `codex-${shortAccountId}-${email}-${planType}.json`;
+        }
+
+        function buildGenericFileName(data) {
+            const identifier = sanitizeFileName(data.email || data.accountId || buildTimestamp());
+            return `openai-account-${identifier}.json`;
+        }
+
+        function collectRuntimeConfig() {
+            return {
+                baseUrl: getFieldValue('oauthBaseUrl'),
+                outboundProxyUrl: getFieldValue('outboundProxyUrl')
+            };
+        }
+
+        function persistRuntimeConfig() {
+            const runtimeConfig = collectRuntimeConfig();
+            localStorage.setItem(STORAGE_KEYS.oauthBaseUrl, runtimeConfig.baseUrl);
+            localStorage.setItem(STORAGE_KEYS.outboundProxyUrl, runtimeConfig.outboundProxyUrl);
+        }
+
+        function restoreRuntimeConfig() {
+            getInput('oauthBaseUrl').value = localStorage.getItem(STORAGE_KEYS.oauthBaseUrl) || '';
+            getInput('outboundProxyUrl').value = localStorage.getItem(STORAGE_KEYS.outboundProxyUrl) || '';
+        }
+
+        function applyExtractedData(apiData) {
+            getInput('clientId').value = apiData.client_id || DEFAULT_CLIENT_ID;
+            getInput('email').value = apiData.user_email || '';
+            getInput('accountId').value = apiData.account_id || '';
+            getInput('refreshToken').value = apiData.refresh_token || '';
+            getInput('accessToken').value = apiData.access_token || '';
+            getInput('sessionToken').value = apiData.session_token || apiData.id_token || '';
+
+            exportState.userId = apiData.user_id || '';
+            exportState.organizationId = apiData.organization_id || '';
+            exportState.planType = apiData.plan_type || 'account';
+            exportState.expiresIn = Number(apiData.expires_in || 0);
+            exportState.accessTokenExpiresAt = Number(apiData.access_token_expires_at || 0);
+
+            document.getElementById('resultArea').classList.remove('hidden');
+            setExportButtonsDisabled(false);
+        }
+
+        function resetExportData() {
+            getInput('clientId').value = '';
+            getInput('email').value = '';
+            getInput('accountId').value = '';
+            getInput('refreshToken').value = '';
+            getInput('accessToken').value = '';
+            getInput('sessionToken').value = '';
+
+            exportState.userId = '';
+            exportState.organizationId = '';
+            exportState.planType = '';
+            exportState.expiresIn = 0;
+            exportState.accessTokenExpiresAt = 0;
+
+            document.getElementById('resultArea').classList.add('hidden');
+            setExportButtonsDisabled(true);
+        }
+
         // 自动检测回调
         window.onload = () => {
+            resetExportData();
+            restoreRuntimeConfig();
+
             const urlParams = new URLSearchParams(window.location.search);
             if (urlParams.has('code')) {
-                document.getElementById('callbackUrl').value = window.location.href;
+                getInput('callbackUrl').value = window.location.href;
                 log('Callback detected automatically. Ready to extract.', 'success');
-                // 自动触发提取 (可选)
-                // document.getElementById('extractBtn').click();
             }
+
+            getInput('oauthBaseUrl').addEventListener('change', persistRuntimeConfig);
+            getInput('outboundProxyUrl').addEventListener('change', persistRuntimeConfig);
         };
 
-        // 生成链接
         document.getElementById('genBtn').onclick = async () => {
             const btn = document.getElementById('genBtn');
             btn.disabled = true;
+            resetExportData();
             log('Initiating authentication sequence...', 'info');
 
             try {
+                const runtimeConfig = collectRuntimeConfig();
                 const res = await fetch('/api/generate-auth-url', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({})
+                    body: JSON.stringify(runtimeConfig)
                 });
                 const data = await parseApiResponse(res);
-                
+
                 if (data.success) {
-                    document.getElementById('authUrl').value = data.data.authUrl;
+                    getInput('authUrl').value = data.data.authUrl;
                     document.getElementById('authUrlWrapper').style.display = 'flex';
                     sessionId = data.data.sessionId;
                     localStorage.setItem('oauth_session_id', sessionId);
-                    
+
                     log('Session ID generated: ' + sessionId.substring(0, 8) + '...', 'info');
                     log('Auth URL generated successfully.', 'success');
                 } else {
                     log('Server error: ' + data.message, 'error');
                 }
-            } catch(e) { 
+            } catch (e) {
                 log('Network connection failed.', 'error');
             } finally {
                 btn.disabled = false;
             }
         };
 
-        // 提取 Token
         document.getElementById('extractBtn').onclick = async () => {
-            const urlStr = document.getElementById('callbackUrl').value.trim();
+            const urlStr = getInput('callbackUrl').value.trim();
             if (!urlStr) {
                 log('Error: Callback URL is empty.', 'error');
                 return;
             }
-            
+
             log('Parsing callback data...', 'info');
-            
+
             try {
                 let code = '';
                 if (urlStr.includes('code=')) {
@@ -492,33 +794,37 @@
                     code = urlStr;
                 }
 
-                if(!code) {
+                if (!code) {
                     log('Error: Invalid auth code format.', 'error');
                     return;
                 }
 
                 log('Exchanging code for token...', 'info');
 
+                const runtimeConfig = collectRuntimeConfig();
                 const res = await fetch('/api/exchange-code', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ code, sessionId })
+                    body: JSON.stringify({
+                        code,
+                        sessionId,
+                        ...runtimeConfig
+                    })
                 });
                 const data = await parseApiResponse(res);
-                
+
                 if (data.success) {
-                    document.getElementById('clientId').value = data.data.client_id || DEFAULT_CLIENT_ID;
-                    document.getElementById('refreshToken').value = data.data.refresh_token;
-                    // 新增 Access Token 赋值
-                    document.getElementById('accessToken').value = data.data.access_token || 'N/A';
-                    
-                    document.getElementById('resultArea').classList.remove('hidden');
-                    
+                    applyExtractedData(data.data || {});
+
                     log('Token exchange successful.', 'success');
                     log('Client ID ready (from OAuth app config).', 'success');
                     log(`User Email: ${data.data.user_email || 'Unknown'}`, 'info');
+                    log(`Account ID: ${data.data.account_id || 'Unknown'}`, 'info');
                     log('Refresh token secured.', 'success');
                     log('Access token secured.', 'success');
+                    if (data.data.session_token || data.data.id_token) {
+                        log('Session token secured.', 'success');
+                    }
                 } else {
                     const extra = data?.error?.error_description || data?.error?.message || '';
                     log('Exchange failed: ' + data.message + (extra ? ` | ${extra}` : ''), 'error');
@@ -526,9 +832,33 @@
                         log('429 rate limit from OpenAI. Please retry later, or configure OPENAI_CLIENT_ID/OPENAI_PROXY.', 'warn');
                     }
                 }
-            } catch(e) { 
+            } catch (e) {
                 log('Critical process error: ' + e.message, 'error');
             }
+        };
+
+        document.getElementById('exportGenericBtn').onclick = () => {
+            const data = ensureExportData();
+            if (!data) return;
+
+            downloadJson(buildGenericFileName(data), buildGenericExport(data));
+            log('Generic export generated.', 'success');
+        };
+
+        document.getElementById('exportCodexBtn').onclick = () => {
+            const data = ensureExportData();
+            if (!data) return;
+
+            downloadJson(buildCodexFileName(data), buildCodexExport(data));
+            log('Codex export generated.', 'success');
+        };
+
+        document.getElementById('exportSub2ApiBtn').onclick = () => {
+            const data = ensureExportData();
+            if (!data) return;
+
+            downloadJson(`sub2api-account-${buildTimestamp()}.json`, buildSub2ApiExport(data));
+            log('Sub2API export generated.', 'success');
         };
     </script>
 </body>
